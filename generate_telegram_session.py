@@ -2,6 +2,7 @@ import asyncio
 import os
 import sys
 from pathlib import Path
+from getpass import getpass
 
 from telethon import TelegramClient
 from telethon.sessions import StringSession
@@ -27,7 +28,12 @@ async def main() -> None:
     api_hash = os.getenv("TELEGRAM_API_HASH")
 
     if not api_id or not api_hash:
-        print("Hata: TELEGRAM_API_ID ve TELEGRAM_API_HASH .env icinde olmali.")
+        print("TELEGRAM_API_ID ve TELEGRAM_API_HASH .env icinde bulunamadi.")
+        api_id = api_id or input("TELEGRAM_API_ID: ").strip()
+        api_hash = api_hash or getpass("TELEGRAM_API_HASH: ").strip()
+
+    if not api_id or not api_hash:
+        print("Hata: TELEGRAM_API_ID ve TELEGRAM_API_HASH gerekli.")
         sys.exit(1)
 
     client = TelegramClient(StringSession(), int(api_id), api_hash)
