@@ -2,144 +2,118 @@ import asyncio
 import html
 import os
 import sys
-from dataclasses import dataclass
-from pathlib import Path
 
 from telethon import TelegramClient, events
 from telethon.errors import FloodWaitError
-from telethon.sessions import StringSession
-from telethon.tl.types import ChannelParticipantsAdmins, User
+from telethon.tl.functions.channels import GetParticipantRequest
+from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
 
 
-DATA_DIR = Path("data")
-SESSION_NAME = os.getenv("TELEGRAM_SESSION", str(DATA_DIR / "etiketbot"))
-STRING_SESSION = os.getenv("TELEGRAM_STRING_SESSION")
-API_ID = os.getenv("TELEGRAM_API_ID")
-API_HASH = os.getenv("TELEGRAM_API_HASH")
+API_ID = os.getenv("TELEGRAM_API_ID") or os.getenv("APP_ID")
+API_HASH = os.getenv("TELEGRAM_API_HASH") or os.getenv("API_HASH") or os.getenv("APP_HASH")
+BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN") or os.getenv("BOT_TOKEN") or os.getenv("TOKEN")
 
 MENTIONS_PER_MESSAGE = int(os.getenv("MENTIONS_PER_MESSAGE", "5"))
 MESSAGE_DELAY_SECONDS = float(os.getenv("MESSAGE_DELAY_SECONDS", "2.0"))
-ADMIN_ONLY = os.getenv("ADMIN_ONLY", "1").lower() not in {"0", "false", "hayir", "hayır", "no"}
 
-TAG_COMMANDS = ("/tag", "!tag", ".tag", "/etiket", "!etiket", ".etiket")
-CANCEL_COMMANDS = ("/cancel", "!cancel", ".cancel", "/iptal", "!iptal", ".iptal")
-HELP_COMMANDS = ("/help", "!help", ".help", "/yardim", "/yardım", "!yardim", "!yardım")
+# Sen herkes kullansin istedigin icin varsayilan kapali.
+ADMIN_ONLY = os.getenv("ADMIN_ONLY", "0").lower() in {"1", "true", "evet", "yes"}
+
+MENTION_COMMANDS = ("/mentionall", "/all", "/etiket", "/tag")
+CANCEL_COMMANDS = ("/cancel", "/iptal")
+HELP_COMMANDS = ("/help", "/yardim", "/yardım", "/start")
 
 active_jobs: dict[int, asyncio.Task] = {}
 
 
-@dataclass(frozen=True)
-class MentionTarget:
-    user_id: int
-    display_name: str
+def require_config() -> tuple[int, str, str]:
+    missing = []
+    if not API_ID:
+        missing.append("TELEGRAM_API_ID")
+    if not API_HASH:
+        missing.append("TELEGRAM_API_HASH")
+    if not BOT_TOKEN:
+        missing.append("TELEGRAM_BOT_TOKEN")
 
-
-def require_config() -> tuple[int, str]:
-    if not API_ID or not API_HASH:
-        print("Hata: TELEGRAM_API_ID ve TELEGRAM_API_HASH ortam degiskenleri ayarlanmali.")
-        print("Ornek: copy mentionbot.env.example .env ve README_ETIKET_BOT.md dosyasina bak.")
+    if missing:
+        print("Eksik ortam degiskenleri: " + ", ".join(missing))
+        print("Railway Variables icine API bilgilerini ve BotFather tokenini ekle.")
         sys.exit(1)
 
     try:
-        return int(API_ID), API_HASH
+        return int(API_ID), API_HASH, BOT_TOKEN
     except ValueError:
-        print("Hata: TELEGRAM_API_ID sayisal olmali.")
+        print("TELEGRAM_API_ID sayisal olmali.")
         sys.exit(1)
 
 
-def load_dotenv_file() -> None:
-    env_path = Path(".env")
-    if not env_path.exists():
-        return
-
-    for raw_line in env_path.read_text(encoding="utf-8").splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#") or "=" not in line:
-            continue
-        key, value = line.split("=", 1)
-        key = key.strip()
-        value = value.strip().strip('"').strip("'")
-        os.environ.setdefault(key, value)
-
-
-def first_command_match(text: str, commands: tuple[str, ...]) -> str | None:
+def command_match(text: str, commands: tuple[str, ...]) -> tuple[str, str] | None:
     lowered = text.casefold()
     for command in commands:
         if lowered == command or lowered.startswith(command + " "):
-            return command
+            return command, text[len(command):].strip()
     return None
 
 
-def command_argument(text: str, command: str) -> str:
-    return text[len(command):].strip()
-
-
-def user_display_name(user: User) -> str:
-    full_name = " ".join(part for part in (user.first_name, user.last_name) if part).strip()
-    return full_name or user.username or f"Kullanici {user.id}"
-
-
-def mention_html(target: MentionTarget) -> str:
-    return f'<a href="tg://user?id={target.user_id}">{html.escape(target.display_name)}</a>'
+def mention_user(user) -> str:
+    name = " ".join(part for part in (user.first_name, user.last_name) if part).strip()
+    name = name or user.username or f"Kullanici {user.id}"
+    return f'<a href="tg://user?id={user.id}">{html.escape(name)}</a>'
 
 
 async def sender_is_admin(client: TelegramClient, chat_id: int, sender_id: int) -> bool:
+    participant = await client(GetParticipantRequest(chat_id, sender_id))
+    return isinstance(participant.participant, (ChannelParticipantAdmin, ChannelParticipantCreator))
+
+
+async def can_use_command(event: events.NewMessage.Event) -> bool:
     if not ADMIN_ONLY:
         return True
 
-    async for admin in client.iter_participants(chat_id, filter=ChannelParticipantsAdmins):
-        if admin.id == sender_id:
-            return True
-    return False
+    try:
+        return await sender_is_admin(event.client, event.chat_id, event.sender_id)
+    except Exception:
+        return False
 
 
-async def collect_targets(client: TelegramClient, chat_id: int) -> list[MentionTarget]:
-    targets: list[MentionTarget] = []
+def help_text() -> str:
+    return (
+        "MentionAll Bot komutlari:\n\n"
+        "/mentionall mesaj - gruptaki uyeleri etiketler\n"
+        "/etiket mesaj - Turkce komut\n"
+        "/tag mesaj - kisa komut\n"
+        "/iptal veya /cancel - aktif etiketlemeyi durdurur\n\n"
+        "Bir mesaja yanit vererek /mentionall yazarsan, etiketler o mesaja yanit olarak gider."
+    )
 
-    async for user in client.iter_participants(chat_id, aggressive=True):
-        if user.bot or user.deleted:
-            continue
-        targets.append(MentionTarget(user.id, user_display_name(user)))
 
-    return targets
-
-
-async def tag_members(event: events.NewMessage.Event, custom_text: str) -> None:
+async def run_mention_job(event: events.NewMessage.Event, message_text: str) -> None:
     chat_id = event.chat_id
     client = event.client
-    sender = await event.get_sender()
-
-    if not await sender_is_admin(client, chat_id, sender.id):
-        await event.reply("Bu komutu sadece grup yoneticileri kullanabilir.")
-        return
-
-    if chat_id in active_jobs and not active_jobs[chat_id].done():
-        await event.reply("Bu grupta zaten etiketleme calisiyor. Durdurmak icin /iptal yaz.")
-        return
+    reply_message = await event.get_reply_message() if event.is_reply else None
 
     async def worker() -> None:
-        targets = await collect_targets(client, chat_id)
-        if not targets:
-            await event.reply("Etiketlenecek uygun uye bulunamadi.")
-            return
+        count = 0
+        buffer: list[str] = []
 
-        header = custom_text or "Herkes buraya bakabilir mi?"
-        await event.reply(f"Etiketleme basladi. {len(targets)} uye parcalar halinde etiketlenecek.")
+        await event.reply("Etiketleme basladi. Durdurmak icin /iptal yaz.")
 
-        for index in range(0, len(targets), MENTIONS_PER_MESSAGE):
-            batch = targets[index:index + MENTIONS_PER_MESSAGE]
-            mention_line = " ".join(mention_html(target) for target in batch)
-            text = f"{html.escape(header)}\n\n{mention_line}"
+        async for user in client.iter_participants(chat_id):
+            if user.bot or user.deleted:
+                continue
 
-            try:
-                await client.send_message(chat_id, text, parse_mode="html", link_preview=False)
-            except FloodWaitError as exc:
-                await asyncio.sleep(exc.seconds + 1)
-                await client.send_message(chat_id, text, parse_mode="html", link_preview=False)
+            buffer.append(mention_user(user))
+            count += 1
 
-            await asyncio.sleep(MESSAGE_DELAY_SECONDS)
+            if len(buffer) >= MENTIONS_PER_MESSAGE:
+                await send_mentions(client, chat_id, buffer, message_text, reply_message)
+                buffer.clear()
+                await asyncio.sleep(MESSAGE_DELAY_SECONDS)
 
-        await event.reply("Etiketleme tamamlandi.")
+        if buffer:
+            await send_mentions(client, chat_id, buffer, message_text, reply_message)
+
+        await event.reply(f"Etiketleme tamamlandi. {count} uye etiketlendi.")
 
     task = asyncio.create_task(worker())
     active_jobs[chat_id] = task
@@ -152,67 +126,76 @@ async def tag_members(event: events.NewMessage.Event, custom_text: str) -> None:
         active_jobs.pop(chat_id, None)
 
 
-async def cancel_tagging(event: events.NewMessage.Event) -> None:
-    task = active_jobs.get(event.chat_id)
-    if not task or task.done():
-        await event.reply("Bu grupta aktif etiketleme yok.")
+async def send_mentions(client, chat_id: int, mentions: list[str], message_text: str, reply_message) -> None:
+    mention_line = " ".join(mentions)
+    if reply_message:
+        text = mention_line
+        send = lambda: reply_message.reply(text, parse_mode="html", link_preview=False)
+    else:
+        text = f"{mention_line}\n\n{html.escape(message_text)}" if message_text else mention_line
+        send = lambda: client.send_message(chat_id, text, parse_mode="html", link_preview=False)
+
+    try:
+        await send()
+    except FloodWaitError as exc:
+        await asyncio.sleep(exc.seconds + 1)
+        await send()
+
+
+async def handle_mention(event: events.NewMessage.Event, message_text: str) -> None:
+    if event.is_private:
+        await event.reply("Bu komut grup ve kanallarda kullanilir.")
         return
 
-    sender = await event.get_sender()
-    if not await sender_is_admin(event.client, event.chat_id, sender.id):
+    if not await can_use_command(event):
         await event.reply("Bu komutu sadece grup yoneticileri kullanabilir.")
+        return
+
+    if active_jobs.get(event.chat_id):
+        await event.reply("Bu grupta etiketleme zaten calisiyor. Durdurmak icin /iptal yaz.")
+        return
+
+    if not message_text and not event.is_reply:
+        await event.reply("Bir mesaj yaz veya bir mesaja yanit vererek komutu kullan.")
+        return
+
+    await run_mention_job(event, message_text)
+
+
+async def handle_cancel(event: events.NewMessage.Event) -> None:
+    task = active_jobs.get(event.chat_id)
+    if not task or task.done():
+        await event.reply("Aktif etiketleme yok.")
         return
 
     task.cancel()
 
 
-def help_text() -> str:
-    return (
-        "Etiket bot komutlari:\n"
-        "/etiket Mesaj - gruptaki uyeleri parca parca etiketler\n"
-        "/tag Mesaj - ayni komutun kisa hali\n"
-        "/iptal - aktif etiketlemeyi durdurur\n\n"
-        "Not: Varsayilan olarak sadece grup yoneticileri kullanabilir."
-    )
-
-
 async def main() -> None:
-    DATA_DIR.mkdir(exist_ok=True)
-    load_dotenv_file()
-
-    global API_ID, API_HASH
-    API_ID = os.getenv("TELEGRAM_API_ID")
-    API_HASH = os.getenv("TELEGRAM_API_HASH")
-    api_id, api_hash = require_config()
-
-    session = StringSession(STRING_SESSION) if STRING_SESSION else SESSION_NAME
-    client = TelegramClient(session, api_id, api_hash)
+    api_id, api_hash, bot_token = require_config()
+    client = TelegramClient("mentionall_bot", api_id, api_hash)
 
     @client.on(events.NewMessage(incoming=True))
     async def handler(event: events.NewMessage.Event) -> None:
-        if not event.is_group:
-            return
-
         text = (event.raw_text or "").strip()
         if not text:
             return
 
-        command = first_command_match(text, HELP_COMMANDS)
-        if command:
+        if command_match(text, HELP_COMMANDS):
             await event.reply(help_text())
             return
 
-        command = first_command_match(text, CANCEL_COMMANDS)
-        if command:
-            await cancel_tagging(event)
+        cancel = command_match(text, CANCEL_COMMANDS)
+        if cancel:
+            await handle_cancel(event)
             return
 
-        command = first_command_match(text, TAG_COMMANDS)
-        if command:
-            await tag_members(event, command_argument(text, command))
+        mention = command_match(text, MENTION_COMMANDS)
+        if mention:
+            await handle_mention(event, mention[1])
 
-    print("Etiket bot aktif. Cikmak icin Ctrl+C.")
-    await client.start()
+    print("MentionAll bot aktif.")
+    await client.start(bot_token=bot_token)
     await client.run_until_disconnected()
 
 
