@@ -155,10 +155,6 @@ async def handle_mention(event: events.NewMessage.Event, message_text: str) -> N
         await event.reply("Bu grupta etiketleme zaten calisiyor. Durdurmak icin /iptal yaz.")
         return
 
-    if not message_text and not event.is_reply:
-        await event.reply("Bir mesaj yaz veya bir mesaja yanit vererek komutu kullan.")
-        return
-
     await run_mention_job(event, message_text)
 
 
