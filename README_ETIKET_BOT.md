@@ -43,11 +43,14 @@ Grupta herkes kullanabilir:
 /yardim
 ```
 
+Gruplarda Telegram'in ekledigi `/etiket@BotKullaniciAdi` biçimi de desteklenir.
+
 Bir mesaja yanit verip `/mentionall` yazarsan, bot etiketleri o mesaja yanit olarak yollar.
 
 ## Notlar
 
 - Botu gruba eklemen gerekir.
-- Uye listeleme Telegram izinlerine ve grup tipine bagli olabilir.
+- Buyuk gruplar Telegram'da `megagroup` sayilir. Bot uye listesini alamiyorsa botu grup
+  yoneticisi yapip yeniden dene.
 - `ADMIN_ONLY=1` yaparsan komutlari sadece grup yoneticileri kullanabilir.
 - Cok buyuk gruplarda Telegram limitlerine takilmamak icin `MENTIONS_PER_MESSAGE` dusuk, `MESSAGE_DELAY_SECONDS` daha yuksek tutulmali.

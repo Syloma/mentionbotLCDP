@@ -2,9 +2,10 @@ import asyncio
 import html
 import os
 import sys
+import traceback
 
 from telethon import TelegramClient, events
-from telethon.errors import FloodWaitError
+from telethon.errors import ChatAdminRequiredError, FloodWaitError, RPCError
 from telethon.tl.functions.channels import GetParticipantRequest
 from telethon.tl.types import ChannelParticipantAdmin, ChannelParticipantCreator
 
@@ -47,11 +48,24 @@ def require_config() -> tuple[int, str, str]:
         sys.exit(1)
 
 
-def command_match(text: str, commands: tuple[str, ...]) -> tuple[str, str] | None:
-    lowered = text.casefold()
+def command_match(
+    text: str,
+    commands: tuple[str, ...],
+    bot_username: str | None = None,
+) -> tuple[str, str] | None:
+    """Komutu, gruplarda Telegram'in ekledigi /komut@bot biçimiyle de eşleştir."""
+    parts = text.split(maxsplit=1)
+    command_token = parts[0].casefold()
+    argument = parts[1].strip() if len(parts) == 2 else ""
+
+    command_name, separator, target_username = command_token.partition("@")
+    if separator:
+        if not bot_username or target_username != bot_username.lstrip("@").casefold():
+            return None
+
     for command in commands:
-        if lowered == command or lowered.startswith(command + " "):
-            return command, text[len(command):].strip()
+        if command_name == command.casefold():
+            return command, argument
     return None
 
 
@@ -122,6 +136,21 @@ async def run_mention_job(event: events.NewMessage.Event, message_text: str) -> 
         await task
     except asyncio.CancelledError:
         await event.reply("Etiketleme iptal edildi.")
+    except ChatAdminRequiredError:
+        await event.reply(
+            "Uye listesini alamadim. Buyuk gruplarda botu yonetici yapip "
+            "yeniden dene (uye listesini gorme yetkisi gerekli)."
+        )
+    except RPCError as exc:
+        print(f"Telegram API hatasi ({chat_id}): {type(exc).__name__}: {exc}")
+        await event.reply(
+            "Telegram uye listesini vermedi. Botun grupta yonetici oldugunu "
+            "kontrol edip yeniden dene."
+        )
+    except Exception:
+        print(f"Etiketleme hatasi ({chat_id}):")
+        traceback.print_exc()
+        await event.reply("Etiketleme beklenmeyen bir hata nedeniyle durdu. Lutfen yeniden dene.")
     finally:
         active_jobs.pop(chat_id, None)
 
@@ -135,11 +164,13 @@ async def send_mentions(client, chat_id: int, mentions: list[str], message_text:
         text = f"{mention_line}\n\n{html.escape(message_text)}" if message_text else mention_line
         send = lambda: client.send_message(chat_id, text, parse_mode="html", link_preview=False)
 
-    try:
-        await send()
-    except FloodWaitError as exc:
-        await asyncio.sleep(exc.seconds + 1)
-        await send()
+    while True:
+        try:
+            await send()
+            return
+        except FloodWaitError as exc:
+            # Kalabalik gruplarda arka arkaya birden fazla FloodWait gelebilir.
+            await asyncio.sleep(exc.seconds + 1)
 
 
 async def handle_mention(event: events.NewMessage.Event, message_text: str) -> None:
@@ -171,27 +202,30 @@ async def main() -> None:
     api_id, api_hash, bot_token = require_config()
     client = TelegramClient("mentionall_bot", api_id, api_hash)
 
+    await client.start(bot_token=bot_token)
+    me = await client.get_me()
+    bot_username = (me.username or "").casefold()
+
     @client.on(events.NewMessage(incoming=True))
     async def handler(event: events.NewMessage.Event) -> None:
         text = (event.raw_text or "").strip()
         if not text:
             return
 
-        if command_match(text, HELP_COMMANDS):
+        if command_match(text, HELP_COMMANDS, bot_username):
             await event.reply(help_text())
             return
 
-        cancel = command_match(text, CANCEL_COMMANDS)
+        cancel = command_match(text, CANCEL_COMMANDS, bot_username)
         if cancel:
             await handle_cancel(event)
             return
 
-        mention = command_match(text, MENTION_COMMANDS)
+        mention = command_match(text, MENTION_COMMANDS, bot_username)
         if mention:
             await handle_mention(event, mention[1])
 
     print("MentionAll bot aktif.")
-    await client.start(bot_token=bot_token)
     await client.run_until_disconnected()
 
 
